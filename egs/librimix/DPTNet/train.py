@@ -3,15 +3,12 @@ import argparse
 import json
 
 import torch
-# from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 
-from asteroid import DPTNet
-# from asteroid.engine import schedulers
-
-# from asteroid.data.wham_dataset import WhamDataset
+from asteroid.models import DPTNet
 from asteroid.data import LibriMix
 from asteroid.engine.optimizers import make_optimizer
 from asteroid.engine.system import System
@@ -28,24 +25,11 @@ parser.add_argument("--exp_dir", default="exp/tmp", help="Full path to save best
 
 
 def main(conf):
-    # train_set = WhamDataset(
-    #     conf["data"]["train_dir"],
-    #     conf["data"]["task"],
-    #     sample_rate=conf["data"]["sample_rate"],
-    #     segment=conf["data"]["segment"],
-    #     nondefault_nsrc=conf["data"]["nondefault_nsrc"],
-    # )
-    # val_set = WhamDataset(
-    #     conf["data"]["valid_dir"],
-    #     conf["data"]["task"],
-    #     sample_rate=conf["data"]["sample_rate"],
-    #     nondefault_nsrc=conf["data"]["nondefault_nsrc"],
-    # )
     train_set = LibriMix(
         csv_dir=conf["data"]["train_dir"],
         task=conf["data"]["task"],
         sample_rate=conf["data"]["sample_rate"],
-        n_src=conf["masknet"]["n_src"],
+        n_src=conf["data"]["n_src"],
         segment=conf["data"]["segment"],
     )
 
@@ -53,7 +37,7 @@ def main(conf):
         csv_dir=conf["data"]["valid_dir"],
         task=conf["data"]["task"],
         sample_rate=conf["data"]["sample_rate"],
-        n_src=conf["masknet"]["n_src"],
+        n_src=conf["data"]["n_src"],
         segment=conf["data"]["segment"],
     )
 
@@ -64,6 +48,7 @@ def main(conf):
         num_workers=conf["training"]["num_workers"],
         drop_last=True,
     )
+
     val_loader = DataLoader(
         val_set,
         shuffle=False,
@@ -71,21 +56,14 @@ def main(conf):
         num_workers=conf["training"]["num_workers"],
         drop_last=True,
     )
-    # Update number of source values (It depends on the task)
-    conf["masknet"].update({"n_src": train_set.n_src})
+    conf["masknet"].update({"n_src": conf["data"]["n_src"]})
 
-    model = DPTNet(**conf["filterbank"], **conf["masknet"])
+    model = DPTNet(**conf["filterbank"], **conf["masknet"], sample_rate=conf["data"]["sample_rate"])
     optimizer = make_optimizer(model.parameters(), **conf["optim"])
-    from asteroid.engine.schedulers import DPTNetScheduler
-
-    schedulers = {
-        "scheduler": DPTNetScheduler(
-            # optimizer, len(train_loader) // conf["training"]["batch_size"], 64
-            optimizer, len(train_loader), 64
-        ),
-        "interval": "batch",
-    }
-
+    # Define scheduler
+    scheduler = None
+    if conf["training"]["half_lr"]:
+        scheduler = ReduceLROnPlateau(optimizer=optimizer, factor=0.5, patience=5)
     # Just after instantiating, save the args. Easy loading in the future.
     exp_dir = conf["main_args"]["exp_dir"]
     os.makedirs(exp_dir, exist_ok=True)
@@ -99,48 +77,35 @@ def main(conf):
         model=model,
         loss_func=loss_func,
         optimizer=optimizer,
-        scheduler=schedulers,
         train_loader=train_loader,
         val_loader=val_loader,
+        scheduler=scheduler,
         config=conf,
     )
 
     # Define callbacks
+    callbacks = []
     checkpoint_dir = os.path.join(exp_dir, "checkpoints/")
     checkpoint = ModelCheckpoint(
-        checkpoint_dir, monitor="val_loss", mode="min", save_top_k=1, verbose=True
+        checkpoint_dir, monitor="val_loss", mode="min", save_top_k=5, verbose=True
     )
-    early_stopping = False
+    callbacks.append(checkpoint)
     if conf["training"]["early_stop"]:
-        early_stopping = EarlyStopping(monitor="val_loss", patience=30, verbose=True)
+        callbacks.append(EarlyStopping(monitor="val_loss", mode="min", patience=30, verbose=True))
 
     # Don't ask GPU if they are not available.
     gpus = -1 if torch.cuda.is_available() else None
-    if conf["training"]["cont"]:
-        from glob import glob
-        ckpts = glob('%s/*.ckpt' % checkpoint_dir)
-        ckpts.sort()
-        latest_ckpt = ckpts[-1]
-        trainer = pl.Trainer(
-            max_nb_epochs=conf["training"]["epochs"],
-            checkpoint_callback=checkpoint,
-            early_stop_callback=early_stopping,
-            default_save_path=exp_dir,
-            gpus=gpus,
-            distributed_backend="ddp",
-            gradient_clip_val=conf["training"]["gradient_clipping"],
-            resume_from_checkpoint=latest_ckpt
-        )
-    else:
-        trainer = pl.Trainer(
-            max_epochs=conf["training"]["epochs"],
-            checkpoint_callback=checkpoint,
-            early_stop_callback=early_stopping,
-            default_root_dir=exp_dir,
-            gpus=gpus,
-            distributed_backend="ddp",
-            gradient_clip_val=conf["training"]["gradient_clipping"],
-        )
+    distributed_backend = "ddp" if torch.cuda.is_available() else None
+
+    trainer = pl.Trainer(
+        max_epochs=conf["training"]["epochs"],
+        callbacks=callbacks,
+        default_root_dir=exp_dir,
+        gpus=gpus,
+        distributed_backend=distributed_backend,
+        limit_train_batches=1.0,  # Useful for fast experiment
+        gradient_clip_val=5.0,
+    )
     trainer.fit(system)
 
     best_k = {k: v.item() for k, v in checkpoint.best_k_models.items()}
@@ -158,7 +123,7 @@ def main(conf):
 
 if __name__ == "__main__":
     import yaml
-    from pprint import pprint as print
+    from pprint import pprint
     from asteroid.utils import prepare_parser_from_dict, parse_args_as_dict
 
     # We start with opening the config file conf.yml as a dictionary from
@@ -174,5 +139,5 @@ if __name__ == "__main__":
     # the attributes in an non-hierarchical structure. It can be useful to also
     # have it so we included it here but it is not used.
     arg_dic, plain_args = parse_args_as_dict(parser, return_plain_args=True)
-    print(arg_dic)
+    pprint(arg_dic)
     main(arg_dic)

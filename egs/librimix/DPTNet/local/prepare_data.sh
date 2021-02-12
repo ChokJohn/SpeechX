@@ -1,26 +1,21 @@
 #!/bin/bash
 
-storage_dir=/workspace/ssd2/librimix
-n_src=2
+storage_dir=
+n_src=
 python_path=python
-
-stage=1
 
 . ./utils/parse_options.sh
 
-current_dir=$(pwd)
-
-if [[ $stage -le  0 ]]; then
-    # Clone LibriMix repo
-    git clone https://github.com/JorisCos/LibriMix
-
-    # Run generation script
-    cd LibriMix
-    . generate_librimix.sh $storage_dir
+if [[ $n_src -le  1 ]]
+then
+  changed_n_src=2
+else
+  changed_n_src=n_src
 fi
 
-if [[ $stage -le  1 ]]; then
-    cd $current_dir
-    $python_path local/create_local_metadata.py --librimix_dir $storage_dir/Libri$n_src"Mix"
-fi
+$python_path local/create_local_metadata.py --librimix_dir $storage_dir/Libri$changed_n_src"Mix"
 
+$python_path local/get_text.py \
+  --libridir $storage_dir/LibriSpeech \
+  --split test-clean \
+  --outfile data/test_annotations.csv

@@ -4,17 +4,12 @@
 set -e
 set -o pipefail
 
-# Main storage directory. You'll need disk space to dump the WHAM mixtures and the wsj0 wav
-# files if you start from sphere files.
-storage_dir=/workspace/ssd2/librimix
+# If you haven't generated LibriMix start from stage 0
+# Main storage directory. You'll need disk space to store LibriSpeech, WHAM noises
+# and LibriMix. This is about 500 Gb
+storage_dir=
 
-## If you start from the sphere files, specify the path to the directory and start from stage 0
-#sphere_dir=  # Directory containing sphere files
-## If you already have wsj0 wav files, specify the path to the directory here and start from stage 1
-#wsj0_wav_dir=
-## If you already have the WHAM mixtures, specify the path to the directory here and start from stage 2
-#wham_wav_dir=/media/sam/Data/WSJ/wham_scripts/2speakers_wham/
-## After running the recipe a first time, you can run it from stage 3 directly to train new models.
+# After running the recipe a first time, you can run it from stage 3 directly to train new models.
 
 # Path to the python you'll use for the experiment. Defaults to the current python
 # You can run ./utils/prepare_python_env.sh to create a suitable python environment, paste the output here.
@@ -24,94 +19,91 @@ python_path=python
 # ./run.sh --stage 3 --tag my_tag --task sep_noisy --id 0,1
 
 # General
-stage=3  # Controls from which stage to start
+stage=0  # Controls from which stage to start
 tag=""  # Controls the directory name associated to the experiment
-#tag="448f820a"
-#tag='fixdim0921'
-#tag='6layer'
 # You can ask for several GPUs using id (passed to CUDA_VISIBLE_DEVICES)
-id=0
+id=$CUDA_VISIBLE_DEVICES
+out_dir=librimix # Controls the directory name associated to the evaluation results inside the experiment directory
 
-# Data
-task=sep_clean  # Specify the task here (sep_clean, sep_noisy, enh_single, enh_both)
-sample_rate=8000
+# Network config
+
+# Training config
+epochs=200
+batch_size=4
+num_workers=4
+half_lr=yes
+early_stop=yes
+# Optim config
+optimizer=adam
+lr=0.001
+weight_decay=0.
+# Data config
+sample_rate=16000
 mode=min
-nondefault_src=  # If you want to train a network with 3 output streams for example.
-#gpus=0
+n_src=1
+segment=3
+task=enh_single  # one of 'enh_single', 'enh_both', 'sep_clean', 'sep_noisy'
 
-# Evaluation
-eval_use_gpu=1
 
+eval_use_gpu=0
+# Need to --compute_wer 1 --eval_mode max to be sure the user knows all the metrics
+# are for the all mode.
+compute_wer=0
+eval_mode=
 
 . utils/parse_options.sh
 
-train_dir=data/wav8k/min/train-360
-valid_dir=data/wav8k/min/dev
-test_dir=data/wav8k/min/test
-n_src=2
 
-#sr_string=$(($sample_rate/1000))
-#suffix=wav${sr_string}k/$mode
-#dumpdir=data/$suffix  # directory to put generated json file
-#
-#train_dir=$dumpdir/tr
-#valid_dir=$dumpdir/cv
-#test_dir=$dumpdir/tt
+sr_string=$(($sample_rate/1000))
+suffix=wav${sr_string}k/$mode
 
-#if [[ $stage -le  0 ]]; then
-#  echo "Stage 0: Converting sphere files to wav files"
-#  . local/convert_sphere2wav.sh --sphere_dir $sphere_dir --wav_dir $wsj0_wav_dir
-#fi
-#
-#if [[ $stage -le  1 ]]; then
-#	echo "Stage 1: Generating 8k and 16k WHAM dataset"
-#  . local/prepare_data.sh --wav_dir $wsj0_wav_dir --out_dir $wham_wav_dir --python_path $python_path
-#fi
-#
-#if [[ $stage -le  2 ]]; then
-#	# Make json directories with min/max modes and sampling rates
-#	echo "Stage 2: Generating json files including wav path and duration"
-#	for sr_string in 8; do
-#		for mode_option in min; do
-#			tmp_dumpdir=data/wav${sr_string}k/$mode_option
-#			echo "Generating json files in $tmp_dumpdir"
-#			[[ ! -d $tmp_dumpdir ]] && mkdir -p $tmp_dumpdir
-#			local_wham_dir=$wham_wav_dir/wav${sr_string}k/$mode_option/
-#      $python_path local/preprocess_wham.py --in_dir $local_wham_dir --out_dir $tmp_dumpdir
-#    done
-#  done
-#fi
+if [ -z "$eval_mode" ]; then
+  eval_mode=$mode
+fi
+
+train_dir=data/$suffix/train-360
+valid_dir=data/$suffix/dev
+test_dir=data/wav${sr_string}k/$eval_mode/test
 
 if [[ $stage -le  0 ]]; then
 	echo "Stage 0: Generating Librimix dataset"
+  . local/generate_librimix.sh --storage_dir $storage_dir --n_src $n_src
+fi
+
+if [[ $stage -le  1 ]]; then
+	echo "Stage 1: Generating csv files including wav path and duration"
   . local/prepare_data.sh --storage_dir $storage_dir --n_src $n_src
 fi
 
 # Generate a random ID for the run if no tag is specified
 uuid=$($python_path -c 'import uuid, sys; print(str(uuid.uuid4())[:8])')
 if [[ -z ${tag} ]]; then
-	#tag=${task}_${sr_string}k${mode}_${uuid}
 	tag=${uuid}
 fi
+
 expdir=exp/train_dptnet_${tag}
 mkdir -p $expdir && echo $uuid >> $expdir/run_uuid.txt
 echo "Results from the following experiment will be stored in $expdir"
 
-if [[ $stage -le 3 ]]; then
-  echo "Stage 3: Training"
+
+if [[ $stage -le 2 ]]; then
+  echo "Stage 2: Training"
   mkdir -p logs
-  echo CUDA_VISIBLE_DEVICES=$id $python_path train.py \
+  CUDA_VISIBLE_DEVICES=$id $python_path train.py --exp_dir $expdir \
+		--epochs $epochs \
+		--batch_size $batch_size \
+		--num_workers $num_workers \
+		--half_lr $half_lr \
+		--early_stop $early_stop \
+		--optimizer $optimizer \
+		--lr $lr \
+		--weight_decay $weight_decay \
 		--train_dir $train_dir \
 		--valid_dir $valid_dir \
-		--task $task \
 		--sample_rate $sample_rate \
-		--exp_dir ${expdir}/
-  CUDA_VISIBLE_DEVICES=$id $python_path train.py \
-		--train_dir $train_dir \
-		--valid_dir $valid_dir \
+		--n_src $n_src \
 		--task $task \
-		--sample_rate $sample_rate \
-		--exp_dir ${expdir}/ | tee logs/train_${tag}.log
+		--segment $segment | tee logs/train_${tag}.log
 	cp logs/train_${tag}.log $expdir/train.log
 
 	# Get ready to publish
@@ -119,12 +111,32 @@ if [[ $stage -le 3 ]]; then
 	echo "librimix/DPTNet" > $expdir/publish_dir/recipe_name.txt
 fi
 
-if [[ $stage -le 4 ]]; then
-	echo "Stage 4 : Evaluation"
-	CUDA_VISIBLE_DEVICES=$id $python_path eval.py \
-		--task $task \
-		--test_dir $test_dir \
-		--use_gpu $eval_use_gpu \
-		--exp_dir ${expdir} | tee logs/eval_${tag}.log
+
+if [[ $stage -le 2 ]]; then
+	echo "Stage 2 : Evaluation"
+
+	if [[ $compute_wer -eq 1 ]]; then
+	  if [[ $eval_mode != "max" ]]; then
+	    echo "Cannot compute WER without max mode. Start again with --stage 2 --compute_wer 1 --eval_mode max"
+	    exit 1
+	  fi
+
+    # Install espnet if not instaled
+    if ! python -c "import espnet" &> /dev/null; then
+        echo 'This recipe requires espnet. Installing requirements.'
+        $python_path -m pip install espnet_model_zoo
+        $python_path -m pip install jiwer
+        $python_path -m pip install tabulate
+    fi
+  fi
+
+  $python_path eval.py \
+    --exp_dir $expdir \
+    --test_dir $test_dir \
+  	--out_dir $out_dir \
+  	--use_gpu $eval_use_gpu \
+  	--compute_wer $compute_wer \
+  	--task $task | tee logs/eval_${tag}.log
+
 	cp logs/eval_${tag}.log $expdir/eval.log
 fi
