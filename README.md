@@ -1,5 +1,5 @@
 <div align="center">
-<img src="docs/source/_static/images/asteroid_logo_dark.png" width="50%">
+Adopt from https://github.com/asteroid-team/asteroid
 
 **The PyTorch-based audio source separation toolkit for researchers.**
 
