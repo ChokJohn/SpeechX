@@ -1,0 +1,3 @@
+[submodule "asteroid/fast-transformers"]
+	path = asteroid/fast-transformers
+	url = https://github.com.cnpmjs.org/idiap/fast-transformers.git

@@ -1,10 +1,10 @@
-from asteroid_filterbanks import make_enc_dec
-from ..masknn import DPTransformer
-from .base_models import BaseEncoderMaskerDecoder
+from ..filterbanks import make_enc_dec
+from ..masknn import DualTransformer
+from .base_models import BaseTasNet
 
 
-class DPTNet(BaseEncoderMaskerDecoder):
-    """DPTNet separation model, as described in [1].
+class DPTrans(BaseTasNet):
+    """ DPTNet separation model, as described in [1].
 
     Args:
         n_src (int): Number of masks to estimate.
@@ -39,20 +39,18 @@ class DPTNet(BaseEncoderMaskerDecoder):
         kernel_size (int): Length of the filters.
         stride (int, optional): Stride of the convolution.
             If None (default), set to ``kernel_size // 2``.
-        sample_rate (float): Sampling rate of the model.
         **fb_kwargs (dict): Additional kwards to pass to the filterbank
             creation.
 
-    References
-        - [1]: Jingjing Chen et al. "Dual-Path Transformer Network: Direct
-          Context-Aware Modeling for End-to-End Monaural Speech Separation"
-          Interspeech 2020.
+    References:
+        [1]: Jingjing Chen et al. "Dual-Path Transformer Network: Direct
+            Context-Aware Modeling for End-to-End Monaural Speech Separation"
+            Interspeech 2020.
     """
 
     def __init__(
         self,
         n_src,
-        n_heads=4,
         ff_hid=256,
         chunk_size=100,
         hop_size=None,  # 50
@@ -61,14 +59,12 @@ class DPTNet(BaseEncoderMaskerDecoder):
         ff_activation="relu",
         encoder_activation="relu",
         mask_act="relu",  # sigmoid
-        bidirectional=True,
         dropout=0,
         in_chan=None,  # 64
         fb_name="free",
         kernel_size=16,
         n_filters=64,
         stride=8,
-        sample_rate=8000,
         **fb_kwargs,  # out_chan=64
     ):
         # encoder and decoder are just two conv1d, and they have independent filterbanks
@@ -77,12 +73,7 @@ class DPTNet(BaseEncoderMaskerDecoder):
         # decoder: conv1dtranspose on (1batch, freq, stft_time) -> (1batch, 1, time)
         # transpose is gradient of conv, not real deconv
         encoder, decoder = make_enc_dec(
-            fb_name,
-            kernel_size=kernel_size,
-            n_filters=n_filters,
-            stride=stride,
-            sample_rate=sample_rate,
-            **fb_kwargs,
+            fb_name, kernel_size=kernel_size, n_filters=n_filters, stride=stride, **fb_kwargs
         )
         # it is n_filters
         n_feats = encoder.n_feats_out
@@ -94,10 +85,9 @@ class DPTNet(BaseEncoderMaskerDecoder):
                 f"{n_feats} and {in_chan}"
             )
         # Update in_chan
-        masker = DPTransformer(
+        masker = DualTransformer(
             n_feats,
             n_src,
-            n_heads=n_heads,
             ff_hid=ff_hid,
             ff_activation=ff_activation,
             chunk_size=chunk_size,
@@ -105,7 +95,6 @@ class DPTNet(BaseEncoderMaskerDecoder):
             n_repeats=n_repeats,
             norm_type=norm_type,
             mask_act=mask_act,
-            bidirectional=bidirectional,
             dropout=dropout,
         )
         super().__init__(encoder, masker, decoder, encoder_activation=encoder_activation)
