@@ -1,0 +1,8 @@
+asteroid.dsp.spatial module
+===========================
+
+.. automodule:: asteroid.dsp.spatial
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :private-members:

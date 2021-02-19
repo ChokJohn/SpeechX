@@ -1,0 +1,8 @@
+asteroid.dsp.normalization module
+=================================
+
+.. automodule:: asteroid.dsp.normalization
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :private-members:

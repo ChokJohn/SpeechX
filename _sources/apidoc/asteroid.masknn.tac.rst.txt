@@ -1,0 +1,8 @@
+asteroid.masknn.tac module
+==========================
+
+.. automodule:: asteroid.masknn.tac
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :private-members:

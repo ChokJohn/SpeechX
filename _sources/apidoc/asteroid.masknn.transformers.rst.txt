@@ -1,0 +1,8 @@
+asteroid.masknn.transformers module
+===================================
+
+.. automodule:: asteroid.masknn.transformers
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :private-members:

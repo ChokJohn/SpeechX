@@ -1,0 +1,8 @@
+asteroid.models.dptrans module
+==============================
+
+.. automodule:: asteroid.models.dptrans
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :private-members:
