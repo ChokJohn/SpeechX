@@ -1,0 +1,4 @@
+n_src: 2 3
+freqs: 8k 16k
+modes: min max
+types: mix_clean mix_both mix_single

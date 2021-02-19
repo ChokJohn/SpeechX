@@ -38,13 +38,37 @@ parser.add_argument(
 parser.add_argument(
     "--use_gpu", type=int, default=0, help="Whether to use the GPU for model execution"
 )
-parser.add_argument("--exp_dir", default="exp/tmp", help="Experiment root")
+parser.add_argument("--exp_dir", default="exp/tmp", help="Experiment root"))
+parser.add_argument("--file_path", default="", help="sythesize single file")
 parser.add_argument(
     "--n_save_ex", type=int, default=10, help="Number of audio examples to save, -1 means all"
 )
 
 #compute_metrics = ["si_sdr", "sdr", "sir", "sar", "stoi"]
 compute_metrics = ['sdr']
+
+
+def inference_wav(file_path, conf, model_device, model, ex_save_dir):
+    wavid = os.path.basename(file_path).split('.')[0]
+    mixture, _ = sf.read(file_path, dtype="float32")
+    mixture = torch.from_numpy(mixture)
+    mix = tensors_to_device(mixture, device=model_device)
+    mul = 1
+    mix = mix.view(-1, 1).repeat(1, mul).view(-1)
+    mix_np = mix.cpu().data.numpy()
+    est_sources = model(mix.unsqueeze(0))
+    est_sources_np = est_sources.squeeze(0).cpu().data.numpy()
+    local_save_dir = os.path.join(ex_save_dir, "ex/")
+    os.makedirs(local_save_dir, exist_ok=True)
+    print(local_save_dir)
+    for src_idx, est_src in enumerate(est_sources_np):
+        est_src *= np.max(np.abs(mix_np)) / np.max(np.abs(est_src))
+        sf.write(
+            local_save_dir + "{}_s{}_estimate.wav".format(wavid, src_idx),
+            est_src,
+            conf["sample_rate"],
+        )
+    return
 
 
 def main(conf):
@@ -54,26 +78,39 @@ def main(conf):
     if conf["use_gpu"]:
         model.cuda()
     model_device = next(model.parameters()).device
-    test_set = LibriMix(
-        csv_dir=conf["test_dir"],
-        task=conf["task"],
-        sample_rate=conf["sample_rate"],
-        n_src=conf["train_conf"]["masknet"]["n_src"],
-        segment=None,
-    )  # Uses all segment length
-    # Used to reorder sources only
-    loss_func = PITLossWrapper(pairwise_neg_sisdr, pit_from="pw_mtx")
+    if conf['file_path'] == '':
+        test_set = LibriMix(
+            csv_dir=conf["test_dir"],
+            task=conf["task"],
+            sample_rate=conf["sample_rate"],
+            n_src=conf["train_conf"]["masknet"]["n_src"],
+            segment=None,
+        )  # Uses all segment length
+        # Used to reorder sources only
+        loss_func = PITLossWrapper(pairwise_neg_sisdr, pit_from="pw_mtx")
 
     # Randomly choose the indexes of sentences to save.
     eval_save_dir = os.path.join(conf["exp_dir"], conf["out_dir"])
     ex_save_dir = os.path.join(eval_save_dir, "examples/")
-    if conf["n_save_ex"] == -1:
+    if conf["n_save_ex"] == -1 and conf['file_path']=='':
         conf["n_save_ex"] = len(test_set)
-    save_idx = random.sample(range(len(test_set)), conf["n_save_ex"])
+        save_idx = random.sample(range(len(test_set)), conf["n_save_ex"])
+    else:
+        save_idx = 0
     series_list = []
     torch.no_grad().__enter__()
     sdr=0
     rtf=0
+    if conf['file_path'] != '':
+        file_path=conf['file_path']
+        if os.path.isdir(file_path):
+            wavs=[os.path.join(file_path, wav) for wav in os.listdir(file_path) if '.wav' in wav]
+            for wav in wavs:
+                inference_wav(wav, conf, model_device, model, ex_save_dir)
+        else:
+            inference_wav(file_path, conf, model_device, model, ex_save_dir)
+        return
+
     for idx in tqdm(range(len(test_set))):
         # Forward the network on the mixture.
         mix, sources = tensors_to_device(test_set[idx], device=model_device)

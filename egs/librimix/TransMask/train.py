@@ -3,6 +3,7 @@ import argparse
 import json
 
 import torch
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
@@ -25,6 +26,7 @@ from asteroid.losses import PITLossWrapper, pairwise_neg_sisdr
 # will limit the number of available GPUs for train.py .
 parser = argparse.ArgumentParser()
 parser.add_argument("--exp_dir", default="exp/tmp", help="Full path to save best validation model")
+parser.add_argument("--config", default="local/conf.yml", help="config yaml file")
 
 
 def main(conf):
@@ -77,7 +79,7 @@ def main(conf):
 
     # TODO params
     # model = TransMask(**conf["filterbank"], **conf["masknet"])
-    model = DPTrans(**conf["filterbank"], **conf["masknet"])
+    model = DPTrans(**conf["filterbank"], **conf["masknet"], sample_rate=conf['data']['sample_rate'])
 
     # from torchsummary import summary
     # model.cuda()
@@ -87,19 +89,24 @@ def main(conf):
 
     optimizer = make_optimizer(model.parameters(), **conf["optim"])
 
-    # TODO warmup for transformer
-    from asteroid.engine.schedulers import DPTNetScheduler
-    schedulers = {
-        "scheduler": DPTNetScheduler(
-            # optimizer, len(train_loader) // conf["training"]["batch_size"], 64
-            # optimizer, len(train_loader), 64,
-            optimizer, len(train_loader), 128,
-            stride=2,
-            # exp_max=0.0004 * 16,
-            # warmup_steps=1000
-        ),
-        "interval": "batch",
-    }
+    # Define scheduler
+    scheduler = None
+    if conf["training"]["half_lr"]:
+        scheduler = ReduceLROnPlateau(optimizer=optimizer, factor=0.5, patience=5)
+
+    # # TODO warmup for transformer
+    # from asteroid.engine.schedulers import DPTNetScheduler
+    # schedulers = {
+    #     "scheduler": DPTNetScheduler(
+    #         # optimizer, len(train_loader) // conf["training"]["batch_size"], 64
+    #         # optimizer, len(train_loader), 64,
+    #         optimizer, len(train_loader), 128,
+    #         stride=2,
+    #         # exp_max=0.0004 * 16,
+    #         # warmup_steps=1000
+    #     ),
+    #     "interval": "batch",
+    # }
 
     # from torch.optim.lr_scheduler import ReduceLROnPlateau
     # if conf["training"]["half_lr"]:
@@ -119,24 +126,27 @@ def main(conf):
         model=model,
         loss_func=loss_func,
         optimizer=optimizer,
-        scheduler=schedulers,
         train_loader=train_loader,
         val_loader=val_loader,
+        scheduler=scheduler,
         config=conf,
     )
 
     # Define callbacks
+    callbacks = []
     checkpoint_dir = os.path.join(exp_dir, "checkpoints/")
     # checkpoint_dir = os.path.join(exp_dir)
     checkpoint = ModelCheckpoint(
-        checkpoint_dir, monitor="val_loss", mode="min", save_top_k=1, verbose=True
+        checkpoint_dir, monitor="val_loss", mode="min", save_top_k=5, verbose=True
     )
-    early_stopping = False
+    callbacks.append(checkpoint)
     if conf["training"]["early_stop"]:
-        early_stopping = EarlyStopping(monitor="val_loss", patience=30, verbose=True)
+        callbacks.append(EarlyStopping(monitor="val_loss", mode="min", patience=30, verbose=True))
 
     # Don't ask GPU if they are not available.
     gpus = -1 if torch.cuda.is_available() else None
+    distributed_backend = "ddp" if torch.cuda.is_available() else None
+
     if conf["training"]["cont"]:
         from glob import glob
         ckpts = glob('%s/*.ckpt' % checkpoint_dir)
@@ -144,23 +154,22 @@ def main(conf):
         latest_ckpt = ckpts[-1]
         trainer = pl.Trainer(
             max_epochs=conf["training"]["epochs"],
-            checkpoint_callback=checkpoint,
-            early_stop_callback=early_stopping,
+            callbacks=callbacks,
             default_root_dir=exp_dir,
-            # default_save_path=exp_dir,
             gpus=gpus,
-            distributed_backend="ddp",
+            distributed_backend=distributed_backend,
+            limit_train_batches=1.0,  # Useful for fast experiment
             gradient_clip_val=conf["training"]["gradient_clipping"],
             resume_from_checkpoint=latest_ckpt
         )
     else:
         trainer = pl.Trainer(
             max_epochs=conf["training"]["epochs"],
-            checkpoint_callback=checkpoint,
-            early_stop_callback=early_stopping,
+            callbacks=callbacks,
             default_root_dir=exp_dir,
             gpus=gpus,
-            distributed_backend="ddp",
+            distributed_backend=distributed_backend,
+            limit_train_batches=1.0,  # Useful for fast experiment
             gradient_clip_val=conf["training"]["gradient_clipping"],
         )
     trainer.fit(system)
@@ -187,7 +196,7 @@ if __name__ == "__main__":
     # We start with opening the config file conf.yml as a dictionary from
     # which we can create parsers. Each top level key in the dictionary defined
     # by the YAML file creates a group in the parser.
-    with open("local/conf.yml") as f:
+    with open(parser.parse_args().config) as f:
         def_conf = yaml.safe_load(f)
     parser = prepare_parser_from_dict(def_conf, parser=parser)
     # Arguments are then parsed into a hierarchical dictionary (instead of

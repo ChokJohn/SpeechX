@@ -8,7 +8,6 @@ from .sudormrf import SuDORMRFImprovedNet, SuDORMRFNet
 from .dptnet import DPTNet
 from .lstm_tasnet import LSTMTasNet
 from .demask import DeMask
-from .transmask import TransMask
 from .dptrans import DPTrans
 
 # Sharing-related
@@ -22,7 +21,6 @@ __all__ = [
     "DPTNet",
     "LSTMTasNet",
     "DeMask",
-    "TransMask",
     "DPTrans",
     "DCUNet",
     "DCCRNet",

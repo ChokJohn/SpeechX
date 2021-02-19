@@ -1,4 +1,5 @@
 import torch.nn as nn
+from torch.nn.functional import fold, unfold
 from torch.nn.modules.activation import MultiheadAttention
 from asteroid.masknn import activations, norms
 # from asteroid.masknn.attention import ImprovedTransformedLayer
@@ -7,10 +8,7 @@ from asteroid.masknn.recurrent import SingleRNNBlock
 import torch
 import math
 from asteroid.utils import has_arg
-from fast_transformers.transformers import TransformerEncoder, TransformerEncoderLayer
-from fast_transformers.transformers import TransformerEncoderNoFF, TransformerEncoderNoFFLayer
-from fast_transformers.attention import AttentionLayer, LinearAttention
-from asteroid.dsp.overlap_add import DualPathProcessing
+# from asteroid.dsp.overlap_add import DualPathProcessing
 
 
 class PositionalEmbedding(nn.Module):
@@ -33,175 +31,6 @@ class PositionalEmbedding(nn.Module):
         pos_embedding = torch.repeat_interleave(pos_embedding, x.shape[0], dim=0)
         x = torch.cat([x, pos_embedding], dim=2)
         return self.dropout(x)
-
-
-class RNNTransformerEncoder(nn.Module):
-    def __init__(
-        self,
-        dim_att,  # in_chan
-        dim_ff,
-        n_layers,
-        n_heads,
-        attention_type="linear",
-        dropout=0.0,
-        activation="gelu",  # ff activation
-        norm="gLN",
-    ):
-        super(RNNTransformerEncoder, self).__init__()
-
-        dim_att = dim_att * 2
-        attentions = [LinearAttention() for i in range(n_layers)]
-        attention_layers = [
-            AttentionLayer(
-                attentions[i],
-                d_model=dim_att,
-                n_heads=n_heads
-            ) for i in range(n_layers)
-        ]
-        transformer_encoder_layers = [
-            TransformerEncoderLayer(
-                attention_layers[i],
-                d_model=dim_att,
-                n_heads=n_heads,
-                d_ff=dim_ff,
-                dropout=dropout,
-                activation=activation,
-            ) for i in range(n_layers)
-        ]
-
-        if norm == 'gLN':
-            norm = 'gLNT'
-        self.encoder = TransformerEncoder(
-            transformer_encoder_layers,
-            norm_layer=norms.get(norm)(dim_att)
-        )
-        self.pe = PositionalEmbedding(int(dim_att / 2))
-
-    def forward(self, x):
-        # batch channels length
-        # batch, seq_len, channels
-        x = x.transpose(1, -1)
-        # B, L, E -> B, L, 2E
-        x = self.pe(x)
-        return self.encoder(x).transpose(1, -1)
-
-
-class RNNTransformer(nn.Module):
-    def __init__(
-        self,
-        in_chan,  # encoder out channel 64
-        n_src,
-        n_heads=4,
-        ff_hid=256,
-        n_repeats=6,  # 2
-        norm_type="gLN",
-        ff_activation="gelu",
-        mask_act="gelu",  # sigmoid
-        dropout=0.0,
-        conv_filters=256,
-        conv_kernel=9,
-        conv_stride=1,
-        conv_padding=4,
-    ):
-        super(RNNTransformer, self).__init__()
-        self.in_chan = in_chan
-        self.n_src = n_src
-        self.n_heads = n_heads
-        self.ff_hid = ff_hid
-        self.n_repeats = n_repeats
-        self.norm_type = norm_type
-        self.ff_activation = ff_activation
-        self.mask_act = mask_act
-        self.dropout = dropout
-        self.conv_filters = conv_filters
-        self.conv_kernel = conv_kernel
-        self.conv_stride = conv_stride
-        self.conv_padding = conv_padding
-
-        self.up_conv = nn.Sequential(
-            nn.Conv1d(in_chan, conv_filters, kernel_size=1, stride=1, padding=0, bias=False),
-            activations.get(ff_activation)(),
-            norms.get(norm_type)(conv_filters),
-        )
-        # full pre-activation
-        self.in_conv = nn.Sequential(
-            norms.get(norm_type)(conv_filters),
-            activations.get(ff_activation)(),
-            nn.Conv1d(conv_filters, conv_filters, kernel_size=conv_kernel,
-                      stride=conv_stride, padding=conv_padding, bias=False),
-            norms.get(norm_type)(conv_filters),
-            activations.get(ff_activation)(),
-            nn.Conv1d(conv_filters, conv_filters,
-                      kernel_size=conv_kernel,
-                      stride=conv_stride, padding=conv_padding),
-        )
-
-        self.in_norm = norms.get(norm_type)(conv_filters)
-        self.encoder = RNNTransformerEncoder(
-            dim_att=conv_filters,
-            dim_ff=ff_hid,
-            n_layers=n_repeats,
-            n_heads=n_heads,
-            attention_type="linear",
-            activation=ff_activation,  # ff activation
-            norm=norm_type,
-            dropout=dropout
-        )
-        # 1x1 conv, with PE dim
-        net_out_conv = nn.Conv1d(2 * conv_filters, n_src * in_chan, 1)
-        self.first_out = nn.Sequential(nn.PReLU(), net_out_conv)
-        # Gating and masking in 2D space (after fold)
-        self.net_out = nn.Sequential(nn.Conv1d(in_chan, in_chan, 1), nn.Tanh())
-        self.net_gate = nn.Sequential(nn.Conv1d(in_chan, in_chan, 1), nn.Sigmoid())
-
-        # Get activation function.
-        mask_nl_class = activations.get(mask_act)
-        # For softmax, feed the source dimension.
-        if has_arg(mask_nl_class, "dim"):
-            self.output_act = mask_nl_class(dim=1)
-        else:
-            self.output_act = mask_nl_class()
-
-    def forward(self, mixture_w):
-        # [b, inchan, Lout 2999]
-        batch, n_filters, stft_time = mixture_w.size()
-
-        mixture_w = self.up_conv(mixture_w)
-        mixture_w += self.in_conv(mixture_w)
-
-        mixture_w = self.in_norm(mixture_w)  # [batch, bn_chan, n_frames]
-
-        mixture_w = self.encoder(mixture_w)
-
-        # n_src 1x1conv, PRELU
-        output = self.first_out(mixture_w)
-        output = output.reshape(batch * self.n_src, self.in_chan, stft_time)
-
-        # gating
-        output = self.net_out(output) * self.net_gate(output)
-        # Compute mask
-        output = output.reshape(batch, self.n_src, self.in_chan, -1)
-        est_mask = self.output_act(output)
-        # B, src, chan, Lout
-        return est_mask
-
-    def get_config(self):
-        config = {
-            "in_chan": self.in_chan,
-            "ff_hid": self.ff_hid,
-            "n_heads": self.n_heads,
-            "n_repeats": self.n_repeats,
-            "n_src": self.n_src,
-            "norm_type": self.norm_type,
-            "ff_activation": self.ff_activation,
-            "mask_act": self.mask_act,
-            "dropout": self.dropout,
-            "conv_filters": self.conv_filters,
-            "conv_kernel": self.conv_kernel,
-            "conv_stride": self.conv_stride,
-            "conv_padding": self.conv_padding,
-        }
-        return config
 
 
 class DualTransformedLayer(nn.Module):
@@ -325,14 +154,12 @@ class AcousticTransformerLayer(nn.Module):
         hid_chan=512,
         skip_chan=128,
         conv_kernel_size=3,
-        use_linear_att=False,
         use_sdu=False,
         use_mem=False,
         num_mem_token=2
     ):
         super(AcousticTransformerLayer, self).__init__()
 
-        self.use_linear_att = use_linear_att
         self.use_sdu = use_sdu
         self.use_mem = use_mem
         self.num_mem_token = num_mem_token
@@ -345,33 +172,13 @@ class AcousticTransformerLayer(nn.Module):
         # query,key,value dim
         self.mha = MultiheadAttention(embed_dim, n_heads, dropout=dropout)
 
-        if use_linear_att:
-            dim_att = embed_dim
-            n_layers = 1
-            attentions = [LinearAttention() for i in range(n_layers)]
-            attention_layers = [
-                AttentionLayer(
-                    attentions[i],
-                    d_model=dim_att,
-                    n_heads=n_heads
-                ) for i in range(n_layers)
-            ]
-            transformer_encoder_layers = [
-                TransformerEncoderNoFFLayer(
-                    attention_layers[i],
-                ) for i in range(n_layers)
-            ]
-
-            self.mha = TransformerEncoderNoFF(
-                transformer_encoder_layers,
-            )
-
         # input dim, hidden dim
-        self.ff1 = nn.Sequential(
-            norms.get(norm)(embed_dim),
-            nn.Conv1d(embed_dim, dim_ff, kernel_size=1, stride=1, padding=0, bias=True),
-            activations.get(activation)(),
-        )
+        # self.ff1 = nn.Sequential(
+        #     norms.get(norm)(embed_dim),
+        #     nn.Conv1d(embed_dim, dim_ff, kernel_size=1, stride=1, padding=0, bias=True),
+        #     activations.get(activation)(),
+        # )
+        self.ff1 = nn.Conv1d(embed_dim, dim_ff, kernel_size=1, stride=1, padding=0, bias=True)
         self.ff2 = nn.Conv1d(dim_ff, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
 
         self.dropout = nn.Dropout(dropout)
@@ -395,14 +202,14 @@ class AcousticTransformerLayer(nn.Module):
             mem = self.mem.repeat(batch_size, 1, 1).transpose(1, -1)
             res = torch.concat([mem, res], -1)
 
-        if self.use_linear_att:
-            res = res.transpose(1, -1)
-            res = self.mha(res)
-            res = res.transpose(1, -1)
-        else:
-            res = res.transpose(1, -1).transpose(0, 1)
-            res = self.mha(res, res, res)[0]
-            res = res.transpose(0, 1).transpose(1, -1)
+        # if self.use_linear_att:
+        #     res = res.transpose(1, -1)
+        #     res = self.mha(res)
+        #     res = res.transpose(1, -1)
+        # else:
+        res = res.transpose(1, -1).transpose(0, 1)
+        res = self.mha(res, res, res)[0]
+        res = res.transpose(0, 1).transpose(1, -1)
 
         if self.use_mem:
             res = res[:, :, self.num_mem_token:]
@@ -422,7 +229,9 @@ class AcousticTransformerLayer(nn.Module):
             x = res + x + self.ff_out(x) * self.ff_gate(x)
         else:
             x = res + x
-        out = self.norm_out(x)
+        # TODO removed due to move it to outter part
+        # out = self.norm_out(x)
+        out = x
 
         return out
 
@@ -433,6 +242,8 @@ class DualTransformer(nn.Module):
         self,
         in_chan,  # encoder out channel 64
         n_src,
+        out_chan=None,
+        bn_chan=64,
         n_heads=4,
         ff_hid=256,
         rnn_hid=128,
@@ -449,6 +260,9 @@ class DualTransformer(nn.Module):
     ):
         super(DualTransformer, self).__init__()
         self.in_chan = in_chan
+        out_chan = out_chan if out_chan is not None else in_chan
+        self.out_chan = out_chan
+        self.bn_chan = bn_chan
         self.n_src = n_src
         self.n_heads = n_heads
         self.ff_hid = ff_hid
@@ -467,16 +281,20 @@ class DualTransformer(nn.Module):
 
         # mean, var for the whole sequence and channel, but gamma beta only for channel size
         # gln vs cln: on whole sequence or separately
-        self.in_norm = norms.get(norm_type)(in_chan)
+        # self.in_norm = norms.get(norm_type)(in_chan)
+        layer_norm = norms.get(norm_type)(in_chan)
+        bottleneck_conv = nn.Conv1d(in_chan, bn_chan, 1)
+        self.bottleneck = nn.Sequential(layer_norm, bottleneck_conv)
+
         pe_conv_list = []
         for i in range(pe_conv_k):
-            pe_conv_list.append(nn.Conv2d(in_chan, in_chan, kernel_size=3, stride=1, padding=1, bias=False))
-            pe_conv_list.append(norms.get(norm_type)(in_chan))
+            pe_conv_list.append(nn.Conv2d(bn_chan, bn_chan, kernel_size=3, stride=1, padding=1, bias=False))
+            pe_conv_list.append(norms.get(norm_type)(bn_chan))
             pe_conv_list.append(activations.get(ff_activation)())
         self.pe_conv = nn.Sequential(
             *pe_conv_list
         )
-        d_model = self.in_chan
+        d_model = self.bn_chan
 
         # # *2 for PE
         # self.pe = PositionalEmbedding(in_chan)
@@ -559,11 +377,13 @@ class DualTransformer(nn.Module):
             # )
         # 1x1 conv
         # *2 for PE
-        net_out_conv = nn.Conv2d(d_model, n_src * self.in_chan, 1)
+        self.strnn_norm_out = norms.get(norm_type)(self.bn_chan)
+        net_out_conv = nn.Conv2d(d_model, n_src * self.bn_chan, 1)
         self.first_out = nn.Sequential(nn.PReLU(), net_out_conv)
         # Gating and masking in 2D space (after fold)
-        self.net_out = nn.Sequential(nn.Conv1d(self.in_chan, self.in_chan, 1), nn.Tanh())
-        self.net_gate = nn.Sequential(nn.Conv1d(self.in_chan, self.in_chan, 1), nn.Sigmoid())
+        self.net_out = nn.Sequential(nn.Conv1d(self.bn_chan, self.bn_chan, 1), nn.Tanh())
+        self.net_gate = nn.Sequential(nn.Conv1d(self.bn_chan, self.bn_chan, 1), nn.Sigmoid())
+        self.mask_net = nn.Conv1d(bn_chan, out_chan, 1, bias=False)
 
         # Get activation function.
         mask_nl_class = activations.get(mask_act)
@@ -583,42 +403,77 @@ class DualTransformer(nn.Module):
                 estimated mask of shape [batch, n_src, n_filters, n_frames]
         """
         # [b, inchan, Lout 2999]
-        mixture_w = self.in_norm(mixture_w)  # [batch, bn_chan, n_frames]
+        batch, n_filters, n_frames = mixture_w.size()
+        # mixture_w = self.in_norm(mixture_w)  # [batch, bn_chan, n_frames]
+        mixture_w = self.bottleneck(mixture_w)  # [batch, bn_chan, n_frames] TODO newadded
 
         # PE
         # mixture_w = self.pe(mixture_w.transpose(1, -1)).transpose(1, -1)
 
-        ola = DualPathProcessing(self.chunk_size, self.hop_size)
-        mixture_w = ola.unfold(mixture_w)
+        # ola = DualPathProcessing(self.chunk_size, self.hop_size)
+        # mixture_w = ola.unfold(mixture_w)
+        mixture_w = unfold(
+            mixture_w.unsqueeze(-1),
+            kernel_size=(self.chunk_size, 1),
+            padding=(self.chunk_size, 0),
+            stride=(self.hop_size, 1),
+        )
+        n_chunks = mixture_w.shape[-1]
         # 4 64 100 62 (from 2999)
-        batch, n_filters, self.chunk_size, n_chunks = mixture_w.size()
+        mixture_w = mixture_w.reshape(batch, self.bn_chan, self.chunk_size, n_chunks)
 
         # PE conv
-        mixture_w = self.pe_conv(mixture_w)
+        x = self.pe_conv(mixture_w)
 
         # TODO knowing how long is the sequence
         for layer_idx in range(len(self.layers)):
             intra, inter = self.layers[layer_idx]
-            mixture_w = ola.intra_process(mixture_w, intra)
-            mixture_w = ola.inter_process(mixture_w, inter)
+            # mixture_w = ola.intra_process(mixture_w, intra)
+            # mixture_w = ola.inter_process(mixture_w, inter)
+            # TODO no extra linear and after reshape norm as DPRNN
+            # output = x  # for skip connection
+            # Intra-chunk processing
+            x = x.transpose(1, -1).reshape(batch * n_chunks, self.chunk_size, self.bn_chan).transpose(1, -1)
+            x = intra(x)
+            x = x.reshape(batch, n_chunks, self.bn_chan, self.chunk_size).transpose(1, -1).transpose(1, 2)
+            # TODO SingleRNNBlock contains linear-norm-residual
+            # output = output + x
+            # Inter-chunk processing
+            x = x.transpose(1, 2).reshape(batch * self.chunk_size, self.bn_chan, n_chunks)
+            x = inter(x)
+            x = x.reshape(batch, self.chunk_size, self.bn_chan, n_chunks).transpose(1, 2)
+            # TODO to be added
+            x = self.strnn_norm_out(x)
 
         # n_src 1x1conv, PRELU
-        output = self.first_out(mixture_w)
-        output = output.reshape(batch * self.n_src, self.in_chan, self.chunk_size, n_chunks)
-        # overlap add
-        output = ola.fold(output)
-
-        # gating
+        output = self.first_out(x)
+        output = output.reshape(batch * self.n_src, self.bn_chan, self.chunk_size, n_chunks)
+        # Overlap and add:
+        # [batch, out_chan, chunk_size, n_chunks] -> [batch, out_chan, n_frames]
+        to_unfold = self.bn_chan * self.chunk_size
+        output = fold(
+            output.reshape(batch * self.n_src, to_unfold, n_chunks),
+            (n_frames, 1),
+            kernel_size=(self.chunk_size, 1),
+            padding=(self.chunk_size, 0),
+            stride=(self.hop_size, 1),
+        )
+        # Apply gating
+        output = output.reshape(batch * self.n_src, self.bn_chan, -1)
         output = self.net_out(output) * self.net_gate(output)
         # Compute mask
-        output = output.reshape(batch, self.n_src, self.in_chan, -1)
-        est_mask = self.output_act(output)
+        score = self.mask_net(output)  # TODO new added
+        est_mask = self.output_act(score)
+        est_mask = est_mask.view(batch, self.n_src, self.out_chan, n_frames)
+
         # B, src, chan, Lout
         return est_mask
 
     def get_config(self):
         config = {
             "in_chan": self.in_chan,
+            "out_chan": self.out_chan,
+            "bn_chan": self.bn_chan,
             "ff_hid": self.ff_hid,
             "rnn_hid": self.rnn_hid,
             "rnn_layers": self.rnn_layers,

@@ -117,3 +117,11 @@ venv.bak/
 /.idea/dictionaries/mparient.xml
 /.idea/inspectionProfiles/profiles_settings.xml
 /.idea/vcs.xml
+
+# view-aid
+*.plot
+*.wav
+
+# misc
+*.orig
+*.ckpt

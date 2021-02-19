@@ -6,7 +6,10 @@ set -o pipefail
 
 # Main storage directory. You'll need disk space to dump the WHAM mixtures and the wsj0 wav
 # files if you start from sphere files.
-storage_dir=/workspace/ssd-single-speaker/speech_separation
+#storage_dir=/workspace/ssd-single-speaker/speech_separation
+storage_dir=/workspace/ssd2/librimix/
+data_conf='local/dconfig.min.yml'
+conf='local/dprnn.yml'
 
 ## If you start from the sphere files, specify the path to the directory and start from stage 0
 #sphere_dir=  # Directory containing sphere files
@@ -24,39 +27,12 @@ python_path=python
 # ./run.sh --stage 3 --tag my_tag --task sep_noisy --id 0,1
 
 # General
-stage=4  # Controls from which stage to start
+stage=3  # Controls from which stage to start
 tag=""  # Controls the directory name associated to the experiment
 # tag='130d5f9a'
-# tag='test'
+tag='test'
 # You can ask for several GPUs using id (passed to CUDA_VISIBLE_DEVICES)
 id=0
-
-# Data
-task=sep_clean  # Specify the task here (sep_clean, sep_noisy, enh_single, enh_both)
-sample_rate=8000
-mode=min
-nondefault_src=  # If you want to train a network with 3 output streams for example.
-
-# Training
-batch_size=6
-num_workers=6
-#batch_size=2
-#num_workers=2
-optimizer=adam
-lr=0.001
-epochs=200
-weight_decay=0.00001
-
-# Architecture config
-kernel_size=16
-stride=8
-chunk_size=100
-hop_size=50
-#kernel_size=2
-#stride=1
-#chunk_size=250
-#hop_size=125
-#TODO: segment
 
 # Evaluation
 eval_use_gpu=1
@@ -64,11 +40,12 @@ eval_use_gpu=1
 
 . utils/parse_options.sh
 
-train_dir=data/wav8k/min/train-360
-valid_dir=data/wav8k/min/dev
-test_dir=data/wav8k/min/test
 out_dir=librimix
-n_src=2
+
+data_dir=$(yq r $conf 'data.data_dir')
+n_src=$(yq r $conf 'masknet.n_src')
+task=$(yq r $conf 'data.task')
+echo $data_dir $n_src $task
 
 #sr_string=$(($sample_rate/1000))
 #suffix=wav${sr_string}k/$mode
@@ -104,6 +81,11 @@ n_src=2
 
 if [[ $stage -le  0 ]]; then
 	echo "Stage 0: Generating Librimix dataset"
+  . local/generate_librimix.sh --storage_dir $storage_dir --conf ${data_conf}
+fi
+
+if [[ $stage -le  1 ]]; then
+	echo "Stage 1: Prepare data"
   . local/prepare_data.sh --storage_dir $storage_dir --n_src $n_src
 fi
 
@@ -113,6 +95,7 @@ if [[ -z ${tag} ]]; then
 	#tag=${task}_${sr_string}k${mode}_${uuid}
 	tag=${uuid}
 fi
+
 expdir=exp/train_dprnn_${tag}
 mkdir -p $expdir && echo $uuid >> $expdir/run_uuid.txt
 echo "Results from the following experiment will be stored in $expdir"
@@ -120,37 +103,11 @@ echo "Results from the following experiment will be stored in $expdir"
 if [[ $stage -le 3 ]]; then
   echo "Stage 3: Training"
   mkdir -p logs
-  echo CUDA_VISIBLE_DEVICES=$id $python_path train.py \
-		--train_dir $train_dir \
-		--valid_dir $valid_dir \
-		--task $task \
-		--sample_rate $sample_rate \
-		--lr $lr \
-		--epochs $epochs \
-		--batch_size $batch_size \
-		--num_workers $num_workers \
-		--optimizer $optimizer \
-		--weight_decay $weight_decay \
-		--kernel_size $kernel_size \
-		--stride $stride \
-		--chunk_size $chunk_size \
-		--hop_size $hop_size \
-		--exp_dir ${expdir}/
   CUDA_VISIBLE_DEVICES=$id $python_path train.py \
-		--train_dir $train_dir \
-		--valid_dir $valid_dir \
-		--task $task \
-		--sample_rate $sample_rate \
-		--lr $lr \
-		--epochs $epochs \
-		--batch_size $batch_size \
-		--num_workers $num_workers \
-		--optimizer $optimizer \
-		--weight_decay $weight_decay \
-		--kernel_size $kernel_size \
-		--stride $stride \
-		--chunk_size $chunk_size \
-		--hop_size $hop_size \
+        --config ${conf} \
+		--exp_dir ${expdir}/
+  echo CUDA_VISIBLE_DEVICES=$id $python_path train.py \
+        --config ${conf} \
 		--exp_dir ${expdir}/ | tee logs/train_${tag}.log
 	cp logs/train_${tag}.log $expdir/train.log
 
@@ -161,11 +118,11 @@ fi
 
 if [[ $stage -le 4 ]]; then
 	echo "Stage 4 : Evaluation"
-	#CUDA_VISIBLE_DEVICES=$id $python_path eval.py \
-	#	--task $task \
-	#	--test_dir $test_dir \
-	#	--use_gpu $eval_use_gpu \
-	#	--exp_dir ${expdir} | tee logs/eval_${tag}.log
+	# CUDA_VISIBLE_DEVICES=$id $python_path eval.py \
+	# 	--task $task \
+	# 	--test_dir $test_dir \
+	# 	--use_gpu $eval_use_gpu \
+	# 	--exp_dir ${expdir} | tee logs/eval_${tag}.log
     $python_path eval.py --exp_dir $expdir --test_dir $test_dir \
         --out_dir $out_dir \
         --task $task 

@@ -53,6 +53,7 @@ setup(
         "torch_stoi>=0.1.2",
         "torch_optimizer>=0.0.1a12",
         "julius",
+        "librosa>=0.8.0",
     ],
     entry_points={
         "console_scripts": [

@@ -1,0 +1,56 @@
+# Filterbank config
+filterbank:
+  n_filters: 64
+  kernel_size: 16
+  stride: 8
+  # kernel_size: 8
+  # stride: 4
+# Network config
+masknet:
+  in_chan: 64
+  n_src: 2
+  out_chan: 64
+  ff_hid: 256
+  ff_activation: "gelu"
+  norm_type: "gLN"
+  chunk_size: 100
+  hop_size: 50
+  n_repeats: 6
+  n_heads: 4
+  mask_act: 'sigmoid'
+  dropout: 0.0
+  conv_filters: 256
+  conv_kernel: 9
+  conv_stride: 1
+  conv_padding: 4
+# Training config
+training:
+  cont: false
+  epochs: 4000
+  #TODO
+  batch_size: 6
+  num_workers: 8
+  half_lr: yes
+  early_stop: yes
+  gradient_clipping: 5
+# Optim config
+optim:
+  optimizer: adam
+  lr: 0.001
+  # lr: 0.004
+  # lr: !!float 5.75e-5
+  weight_decay: !!float 1e-5
+scheduler:
+  steps_per_epoch: 10000
+  d_model: 64
+# Data config
+data:
+  task: sep_clean
+  data_dir: data
+  train_dir: data/wav8k/min/train-360
+  valid_dir: data/wav8k/min/dev
+  test_dir: data/wav8k/min/test
+  sample_rate: 8000
+  segment: 3
+  # segment: 4
+  #n_src: 2

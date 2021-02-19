@@ -7,7 +7,9 @@ set -o pipefail
 # Main storage directory. You'll need disk space to dump the WHAM mixtures and the wsj0 wav
 # files if you start from sphere files.
 # storage_dir=/workspace/ssd2/librimix
-storage_dir=/workspace/datasets/librimix
+storage_dir=/workspace/ssd2/librimix/
+data_conf='local/dconfig.min.yml'
+conf='local/transmask.yml'
 
 ## If you start from the sphere files, specify the path to the directory and start from stage 0
 #sphere_dir=  # Directory containing sphere files
@@ -26,8 +28,9 @@ python_path=python
 
 # General
 #TODO
-stage=4  # Controls from which stage to start
+stage=3  # Controls from which stage to start
 tag=""  # Controls the directory name associated to the experiment
+tag='test'
 #tag=addpe
 #tag=pe_conv
 #tag=dptrans
@@ -59,26 +62,18 @@ tag=""  # Controls the directory name associated to the experiment
 # You can ask for several GPUs using id (passed to CUDA_VISIBLE_DEVICES)
 id=0
 
-# Data
-task=sep_clean  # Specify the task here (sep_clean, sep_noisy, enh_single, enh_both)
-sample_rate=8000
-mode=min
-nondefault_src=  # If you want to train a network with 3 output streams for example.
-#gpus=0
-
 # Evaluation
 eval_use_gpu=1
 
 
 . utils/parse_options.sh
 
-#TODO
-data_dir=data
-train_dir=${data_dir}/wav8k/min/train-360
-valid_dir=${data_dir}/wav8k/min/dev
-test_dir=${data_dir}/wav8k/min/test
 out_dir=librimix
-n_src=2
+
+data_dir=$(yq r $conf 'data.data_dir')
+n_src=$(yq r $conf 'masknet.n_src')
+task=$(yq r $conf 'data.task')
+echo $data_dir $n_src $task
 
 #sr_string=$(($sample_rate/1000))
 #suffix=wav${sr_string}k/$mode
@@ -114,9 +109,12 @@ n_src=2
 
 if [[ $stage -le  0 ]]; then
 	echo "Stage 0: Generating Librimix dataset"
-    echo $storage_dir
-    . local/prepare_data.sh --storage_dir $storage_dir --n_src $n_src --out_dir $data_dir
-    exit
+  . local/generate_librimix.sh --storage_dir $storage_dir --conf ${data_conf}
+fi
+
+if [[ $stage -le  1 ]]; then
+	echo "Stage 1: Prepare data"
+  . local/prepare_data.sh --storage_dir $storage_dir --n_src $n_src --out_dir ${data_dir}
 fi
 
 # Generate a random ID for the run if no tag is specified
@@ -134,16 +132,10 @@ if [[ $stage -le 3 ]]; then
   echo "Stage 3: Training"
   mkdir -p logs
   echo CUDA_VISIBLE_DEVICES=$id $python_path train.py \
-		--train_dir $train_dir \
-		--valid_dir $valid_dir \
-		--task $task \
-		--sample_rate $sample_rate \
+        --config ${conf} \
 		--exp_dir ${expdir}/
   CUDA_VISIBLE_DEVICES=$id $python_path train.py \
-		--train_dir $train_dir \
-		--valid_dir $valid_dir \
-		--task $task \
-		--sample_rate $sample_rate \
+        --config ${conf} \
 		--exp_dir ${expdir}/ | tee logs/train_${tag}.log
 	cp logs/train_${tag}.log $expdir/train.log
 
